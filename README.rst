@@ -6,27 +6,28 @@ Scrapy
 ======
 
 .. image:: https://img.shields.io/pypi/v/Scrapy.svg
-   :target: https://pypi.python.org/pypi/Scrapy
+   :target: https://pypi.org/pypi/Scrapy
    :alt: PyPI Version
 
 .. image:: https://img.shields.io/pypi/pyversions/Scrapy.svg
-   :target: https://pypi.python.org/pypi/Scrapy
+   :target: https://pypi.org/pypi/Scrapy
    :alt: Supported Python Versions
 
 .. image:: https://github.com/scrapy/scrapy/workflows/Ubuntu/badge.svg
    :target: https://github.com/scrapy/scrapy/actions?query=workflow%3AUbuntu
    :alt: Ubuntu
 
-.. image:: https://github.com/scrapy/scrapy/workflows/macOS/badge.svg
-   :target: https://github.com/scrapy/scrapy/actions?query=workflow%3AmacOS
-   :alt: macOS
+.. .. image:: https://github.com/scrapy/scrapy/workflows/macOS/badge.svg
+   .. :target: https://github.com/scrapy/scrapy/actions?query=workflow%3AmacOS
+   .. :alt: macOS
+
 
 .. image:: https://github.com/scrapy/scrapy/workflows/Windows/badge.svg
    :target: https://github.com/scrapy/scrapy/actions?query=workflow%3AWindows
    :alt: Windows
 
 .. image:: https://img.shields.io/badge/wheel-yes-brightgreen.svg
-   :target: https://pypi.python.org/pypi/Scrapy
+   :target: https://pypi.org/pypi/Scrapy
    :alt: Wheel Status
 
 .. image:: https://img.shields.io/codecov/c/github/scrapy/scrapy/master.svg
@@ -41,7 +42,7 @@ Scrapy
 Overview
 ========
 
-Scrapy is a fast high-level web crawling and web scraping framework, used to
+Scrapy is a BSD-licensed fast high-level web crawling and web scraping framework, used to
 crawl websites and extract structured data from their pages. It can be used for
 a wide range of purposes, from data mining to monitoring and automated testing.
 
@@ -58,7 +59,7 @@ including a list of features.
 Requirements
 ============
 
-* Python 3.7+
+* Python 3.9+
 * Works on Linux, Windows, macOS, BSD
 
 Install
