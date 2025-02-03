@@ -1,11 +1,11 @@
 import random
 
 from pytest import mark
-from twisted.trial import unittest
-from twisted.internet import reactor, defer
+from twisted.internet import defer, reactor
 from twisted.python.failure import Failure
+from twisted.trial import unittest
 
-from scrapy.utils.asyncgen import collect_asyncgen, as_async_generator
+from scrapy.utils.asyncgen import as_async_generator, collect_asyncgen
 from scrapy.utils.defer import (
     aiter_errback,
     deferred_f_from_coro_f,
@@ -14,7 +14,6 @@ from scrapy.utils.defer import (
     mustbe_deferred,
     parallel_async,
     process_chain,
-    process_chain_both,
     process_parallel,
 )
 
@@ -68,45 +67,33 @@ def eb1(failure, arg1, arg2):
 
 
 class DeferUtilsTest(unittest.TestCase):
-
     @defer.inlineCallbacks
     def test_process_chain(self):
-        x = yield process_chain([cb1, cb2, cb3], 'res', 'v1', 'v2')
+        x = yield process_chain([cb1, cb2, cb3], "res", "v1", "v2")
         self.assertEqual(x, "(cb3 (cb2 (cb1 res v1 v2) v1 v2) v1 v2)")
 
         gotexc = False
         try:
-            yield process_chain([cb1, cb_fail, cb3], 'res', 'v1', 'v2')
+            yield process_chain([cb1, cb_fail, cb3], "res", "v1", "v2")
         except TypeError:
             gotexc = True
         self.assertTrue(gotexc)
 
     @defer.inlineCallbacks
-    def test_process_chain_both(self):
-        x = yield process_chain_both([cb_fail, cb2, cb3], [None, eb1, None], 'res', 'v1', 'v2')
-        self.assertEqual(x, "(cb3 (eb1 TypeError v1 v2) v1 v2)")
-
-        fail = Failure(ZeroDivisionError())
-        x = yield process_chain_both([eb1, cb2, cb3], [eb1, None, None], fail, 'v1', 'v2')
-        self.assertEqual(x, "(cb3 (cb2 (eb1 ZeroDivisionError v1 v2) v1 v2) v1 v2)")
-
-    @defer.inlineCallbacks
     def test_process_parallel(self):
-        x = yield process_parallel([cb1, cb2, cb3], 'res', 'v1', 'v2')
-        self.assertEqual(x, ['(cb1 res v1 v2)', '(cb2 res v1 v2)', '(cb3 res v1 v2)'])
+        x = yield process_parallel([cb1, cb2, cb3], "res", "v1", "v2")
+        self.assertEqual(x, ["(cb1 res v1 v2)", "(cb2 res v1 v2)", "(cb3 res v1 v2)"])
 
     def test_process_parallel_failure(self):
-        d = process_parallel([cb1, cb_fail, cb3], 'res', 'v1', 'v2')
+        d = process_parallel([cb1, cb_fail, cb3], "res", "v1", "v2")
         self.failUnlessFailure(d, TypeError)
         return d
 
 
 class IterErrbackTest(unittest.TestCase):
-
     def test_iter_errback_good(self):
         def itergood():
-            for x in range(10):
-                yield x
+            yield from range(10)
 
         errors = []
         out = list(iter_errback(itergood(), errors.append))
@@ -128,7 +115,6 @@ class IterErrbackTest(unittest.TestCase):
 
 
 class AiterErrbackTest(unittest.TestCase):
-
     @deferred_f_from_coro_f
     async def test_aiter_errback_good(self):
         async def itergood():
@@ -167,11 +153,11 @@ class AsyncDefTestsuiteTest(unittest.TestCase):
     @mark.xfail(reason="Checks that the test is actually executed", strict=True)
     @deferred_f_from_coro_f
     async def test_deferred_f_from_coro_f_xfail(self):
-        raise Exception("This is expected to be raised")
+        raise RuntimeError("This is expected to be raised")
 
 
 class AsyncCooperatorTest(unittest.TestCase):
-    """ This tests _AsyncCooperatorAdapter by testing parallel_async which is its only usage.
+    """This tests _AsyncCooperatorAdapter by testing parallel_async which is its only usage.
 
     parallel_async is called with the results of a callback (so an iterable of items, requests and None,
     with arbitrary delays between values), and it uses Scraper._process_spidermw_output as the callable
@@ -182,6 +168,7 @@ class AsyncCooperatorTest(unittest.TestCase):
     We also want to simulate the real usage, with arbitrary delays between getting the values
     from the iterable. We also want to simulate sync and async results from the callable.
     """
+
     CONCURRENT_ITEMS = 50
 
     @staticmethod
@@ -195,6 +182,7 @@ class AsyncCooperatorTest(unittest.TestCase):
             return dfd
         # simulate trivial sync processing
         results.append(o)
+        return None
 
     @staticmethod
     def get_async_iterable(length):
