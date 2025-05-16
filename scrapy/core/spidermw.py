@@ -23,7 +23,6 @@ from scrapy.middleware import MiddlewareManager
 from scrapy.utils.asyncgen import as_async_generator, collect_asyncgen
 from scrapy.utils.conf import build_component_list
 from scrapy.utils.defer import (
-    deferred_f_from_coro_f,
     deferred_from_coro,
     maybe_deferred_to_future,
     mustbe_deferred,
@@ -85,8 +84,8 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 "either disable or make universal 1 of those 2 sets of "
                 "spider middlewares. Making a spider middleware universal "
                 "means having it define both methods. See the release notes "
-                "of Scrapy VERSION for details: "
-                "https://docs.scrapy.org/en/VERSION/news.html"
+                "of Scrapy 2.13 for details: "
+                "https://docs.scrapy.org/en/2.13/news.html"
             )
 
         self._use_start_requests = bool(deprecated_middlewares)
@@ -103,15 +102,15 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 f"been deprecated in favor of a new method, process_start(), "
                 f"to support asynchronous code execution. "
                 f"process_start_requests() will stop being called in a future "
-                f"version of Scrapy. If you use Scrapy VERSION or higher "
+                f"version of Scrapy. If you use Scrapy 2.13 or higher "
                 f"only, replace process_start_requests() with "
                 f"process_start(); note that process_start() is a coroutine "
                 f"(async def). If you need to maintain compatibility with "
                 f"lower Scrapy versions, when defining "
                 f"process_start_requests() in a spider middleware class, "
                 f"define process_start() as well. See the release notes of "
-                f"Scrapy VERSION for details: "
-                f"https://docs.scrapy.org/en/VERSION/news.html",
+                f"Scrapy 2.13 for details: "
+                f"https://docs.scrapy.org/en/2.13/news.html",
                 ScrapyDeprecationWarning,
             )
 
@@ -169,7 +168,7 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 exception_result = cast(
                     Union[Failure, MutableChain[_T]],
                     self._process_spider_exception(
-                        response, spider, Failure(ex), exception_processor_index
+                        response, spider, ex, exception_processor_index
                     ),
                 )
                 if isinstance(exception_result, Failure):
@@ -185,7 +184,7 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 exception_result = cast(
                     Union[Failure, MutableAsyncChain[_T]],
                     self._process_spider_exception(
-                        response, spider, Failure(ex), exception_processor_index
+                        response, spider, ex, exception_processor_index
                     ),
                 )
                 if isinstance(exception_result, Failure):
@@ -201,13 +200,12 @@ class SpiderMiddlewareManager(MiddlewareManager):
         self,
         response: Response,
         spider: Spider,
-        _failure: Failure,
+        exception: Exception,
         start_index: int = 0,
-    ) -> Failure | MutableChain[_T] | MutableAsyncChain[_T]:
-        exception = _failure.value
+    ) -> MutableChain[_T] | MutableAsyncChain[_T]:
         # don't handle _InvalidOutput exception
         if isinstance(exception, _InvalidOutput):
-            return _failure
+            raise exception
         method_list = islice(
             self.methods["process_spider_exception"], start_index, None
         )
@@ -242,7 +240,7 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 f"or an iterable, got {type(result)}"
             )
             raise _InvalidOutput(msg)
-        return _failure
+        raise exception
 
     # This method cannot be made async def, as _process_spider_exception relies on the Deferred result
     # being available immediately which doesn't work when it's a wrapped coroutine.
@@ -308,7 +306,7 @@ class SpiderMiddlewareManager(MiddlewareManager):
             except Exception as ex:
                 exception_result: Failure | MutableChain[_T] | MutableAsyncChain[_T] = (
                     self._process_spider_exception(
-                        response, spider, Failure(ex), method_index + 1
+                        response, spider, ex, method_index + 1
                     )
                 )
                 if isinstance(exception_result, Failure):
@@ -369,24 +367,36 @@ class SpiderMiddlewareManager(MiddlewareManager):
         request: Request,
         spider: Spider,
     ) -> Deferred[MutableChain[_T] | MutableAsyncChain[_T]]:
+        return deferred_from_coro(
+            self.scrape_response_async(scrape_func, response, request, spider)
+        )
+
+    async def scrape_response_async(
+        self,
+        scrape_func: ScrapeFunc[_T],
+        response: Response,
+        request: Request,
+        spider: Spider,
+    ) -> MutableChain[_T] | MutableAsyncChain[_T]:
         async def process_callback_output(
             result: Iterable[_T] | AsyncIterator[_T],
         ) -> MutableChain[_T] | MutableAsyncChain[_T]:
             return await self._process_callback_output(response, spider, result)
 
         def process_spider_exception(
-            _failure: Failure,
-        ) -> Failure | MutableChain[_T] | MutableAsyncChain[_T]:
-            return self._process_spider_exception(response, spider, _failure)
+            exception: Exception,
+        ) -> MutableChain[_T] | MutableAsyncChain[_T]:
+            return self._process_spider_exception(response, spider, exception)
 
-        dfd: Deferred[Iterable[_T] | AsyncIterator[_T]] = mustbe_deferred(
-            self._process_spider_input, scrape_func, response, request, spider
-        )
-        dfd2: Deferred[MutableChain[_T] | MutableAsyncChain[_T]] = dfd.addCallback(
-            deferred_f_from_coro_f(process_callback_output)
-        )
-        dfd2.addErrback(process_spider_exception)
-        return dfd2
+        try:
+            it: Iterable[_T] | AsyncIterator[_T] = await maybe_deferred_to_future(
+                mustbe_deferred(
+                    self._process_spider_input, scrape_func, response, request, spider
+                )
+            )
+            return await process_callback_output(it)
+        except Exception as ex:
+            return process_spider_exception(ex)
 
     async def process_start(self, spider: Spider) -> AsyncIterator[Any] | None:
         self._check_deprecated_start_requests_use(spider)
@@ -435,15 +445,15 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 f"start_requests() has been deprecated in favor of a new "
                 f"method, start(), to support asynchronous code "
                 f"execution. start_requests() will stop being called in a "
-                f"future version of Scrapy. If you use Scrapy VERSION or "
+                f"future version of Scrapy. If you use Scrapy 2.13 or "
                 f"higher only, replace start_requests() with start(); "
                 f"note that start() is a coroutine (async def). If you "
                 f"need to maintain compatibility with lower Scrapy versions, "
                 f"when overriding start_requests() in a spider class, "
                 f"override start() as well; you can use super() to "
                 f"reuse the inherited start() implementation without "
-                f"copy-pasting. See the release notes of Scrapy VERSION for "
-                f"details: https://docs.scrapy.org/en/VERSION/news.html",
+                f"copy-pasting. See the release notes of Scrapy 2.13 for "
+                f"details: https://docs.scrapy.org/en/2.13/news.html",
                 ScrapyDeprecationWarning,
             )
 
@@ -469,8 +479,8 @@ class SpiderMiddlewareManager(MiddlewareManager):
                 f"deprecated spider middlewares (and earlier Scrapy versions) "
                 f"by defining a sync start_requests() method that works "
                 f"similarly to its existing start() method. See the "
-                f"release notes of Scrapy VERSION for details: "
-                f"https://docs.scrapy.org/en/VERSION/news.html"
+                f"release notes of Scrapy 2.13 for details: "
+                f"https://docs.scrapy.org/en/2.13/news.html"
             )
 
     # This method is only needed until _async compatibility methods are removed.
