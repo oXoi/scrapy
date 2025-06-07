@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import OpenSSL.SSL
 import pytest
-from twisted.internet import defer, reactor
+from twisted.internet import defer
 from twisted.internet.defer import inlineCallbacks
 from twisted.internet.testing import StringTransport
 from twisted.protocols.policies import WrappingFactory
@@ -205,6 +205,8 @@ class EncodingResource(resource.Resource):
 @pytest.mark.filterwarnings("ignore::scrapy.exceptions.ScrapyDeprecationWarning")
 class TestWebClient(unittest.TestCase):
     def _listen(self, site):
+        from twisted.internet import reactor
+
         return reactor.listenTCP(0, site, interface="127.0.0.1")
 
     def setUp(self):
@@ -288,28 +290,22 @@ class TestWebClient(unittest.TestCase):
         d.addCallback(self.assertEqual, to_bytes(f"127.0.0.1:{self.portno}"))
         return d
 
+    @inlineCallbacks
     def test_timeoutTriggering(self):
         """
         When a non-zero timeout is passed to L{getPage} and that many
         seconds elapse before the server responds to the request. the
         L{Deferred} is errbacked with a L{error.TimeoutError}.
         """
-        finished = self.assertFailure(
-            getPage(self.getURL("wait"), timeout=0.000001), defer.TimeoutError
-        )
-
-        def cleanup(passthrough):
-            # Clean up the server which is hanging around not doing
-            # anything.
-            connected = list(self.wrapper.protocols.keys())
-            # There might be nothing here if the server managed to already see
-            # that the connection was lost.
-            if connected:
-                connected[0].transport.loseConnection()
-            return passthrough
-
-        finished.addBoth(cleanup)
-        return finished
+        with pytest.raises(defer.TimeoutError):
+            yield getPage(self.getURL("wait"), timeout=0.000001)
+        # Clean up the server which is hanging around not doing
+        # anything.
+        connected = list(self.wrapper.protocols.keys())
+        # There might be nothing here if the server managed to already see
+        # that the connection was lost.
+        if connected:
+            connected[0].transport.loseConnection()
 
     def testNotFound(self):
         return getPage(self.getURL("notsuchfile")).addCallback(self._cbNoSuchFile)
@@ -318,6 +314,8 @@ class TestWebClient(unittest.TestCase):
         assert b"404 - No Such Resource" in pageData
 
     def testFactoryInfo(self):
+        from twisted.internet import reactor
+
         url = self.getURL("file")
         parsed = urlparse(url)
         factory = client.ScrapyHTTPClientFactory(Request(url))
@@ -380,6 +378,7 @@ class WebClientCustomCiphersSSLTestCase(WebClientSSLTestCase):
             self.getURL("payload"), body=s, contextFactory=client_context_factory
         ).addCallback(self.assertEqual, to_bytes(s))
 
+    @inlineCallbacks
     def testPayloadDisabledCipher(self):
         s = "0123456789" * 10
         crawler = get_crawler(
@@ -388,7 +387,7 @@ class WebClientCustomCiphersSSLTestCase(WebClientSSLTestCase):
             }
         )
         client_context_factory = build_from_crawler(ScrapyClientContextFactory, crawler)
-        d = getPage(
-            self.getURL("payload"), body=s, contextFactory=client_context_factory
-        )
-        return self.assertFailure(d, OpenSSL.SSL.Error)
+        with pytest.raises(OpenSSL.SSL.Error):
+            yield getPage(
+                self.getURL("payload"), body=s, contextFactory=client_context_factory
+            )
