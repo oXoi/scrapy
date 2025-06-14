@@ -12,6 +12,8 @@ def _py_files(folder):
 
 
 collect_ignore = [
+    # may need extra deps
+    "docs/_ext",
     # not a test, but looks like a test
     "scrapy/utils/testproc.py",
     "scrapy/utils/testsite.py",
@@ -19,6 +21,10 @@ collect_ignore = [
     "tests/mockserver.py",
     "tests/pipelines.py",
     "tests/spiders.py",
+    # contains scripts to be run by tests/test_crawler.py::AsyncCrawlerProcessSubprocess
+    *_py_files("tests/AsyncCrawlerProcess"),
+    # contains scripts to be run by tests/test_crawler.py::AsyncCrawlerRunnerSubprocess
+    *_py_files("tests/AsyncCrawlerRunner"),
     # contains scripts to be run by tests/test_crawler.py::CrawlerProcessSubprocess
     *_py_files("tests/CrawlerProcess"),
     # contains scripts to be run by tests/test_crawler.py::CrawlerRunnerSubprocess
@@ -40,12 +46,6 @@ if not H2_ENABLED:
             *_py_files("scrapy/core/http2"),
         )
     )
-
-
-@pytest.fixture
-def chdir(tmpdir):
-    """Change to pytest-provided temporary directory"""
-    tmpdir.chdir()
 
 
 def pytest_addoption(parser):
