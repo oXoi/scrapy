@@ -22,9 +22,11 @@ from unittest.mock import Mock
 from urllib.parse import urlparse
 
 import attr
+import pytest
 from itemadapter import ItemAdapter
 from pydispatch import dispatcher
-from twisted.internet import defer, reactor
+from twisted.internet import defer
+from twisted.internet.defer import inlineCallbacks
 from twisted.trial import unittest
 from twisted.web import server, static, util
 
@@ -130,6 +132,8 @@ class ChangeCloseReasonSpider(MySpider):
 
 
 def start_test_site(debug=False):
+    from twisted.internet import reactor
+
     root_dir = Path(tests_datadir, "test_site")
     r = static.File(str(root_dir))
     r.putChild(b"redirect", util.Redirect(b"/redirected"))
@@ -387,7 +391,7 @@ class TestEngineBase(unittest.TestCase):
 
 
 class TestEngine(TestEngineBase):
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_crawler(self):
         for spider in (
             MySpider,
@@ -404,20 +408,20 @@ class TestEngine(TestEngineBase):
             self._assert_signals_caught(run)
             self._assert_bytes_received(run)
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_crawler_dupefilter(self):
         run = CrawlerRun(DupeFilterSpider)
         yield run.run()
         self._assert_scheduled_requests(run, count=8)
         self._assert_dropped_requests(run)
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_crawler_itemerror(self):
         run = CrawlerRun(ItemZeroDivisionErrorSpider)
         yield run.run()
         self._assert_items_error(run)
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_crawler_change_close_reason_on_idle(self):
         run = CrawlerRun(ChangeCloseReasonSpider)
         yield run.run()
@@ -426,24 +430,32 @@ class TestEngine(TestEngineBase):
             "reason": "custom_reason",
         } == run.signals_caught[signals.spider_closed]
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_close_downloader(self):
         e = ExecutionEngine(get_crawler(MySpider), lambda _: None)
         yield e.close()
 
-    @defer.inlineCallbacks
+    def test_close_without_downloader(self):
+        class CustomException(Exception):
+            pass
+
+        class BadDownloader:
+            def __init__(self, crawler):
+                raise CustomException
+
+        with pytest.raises(CustomException):
+            ExecutionEngine(
+                get_crawler(MySpider, {"DOWNLOADER": BadDownloader}), lambda _: None
+            )
+
+    @inlineCallbacks
     def test_start_already_running_exception(self):
         e = ExecutionEngine(get_crawler(MySpider), lambda _: None)
         yield e.open_spider(MySpider(), [])
         e.start()
-
-        def cb(exc: BaseException) -> None:
-            assert str(exc), "Engine already running"
-
-        try:
-            yield self.assertFailure(e.start(), RuntimeError).addBoth(cb)
-        finally:
-            yield e.stop()
+        with pytest.raises(RuntimeError, match="Engine already running"):
+            yield e.start()
+        yield e.stop()
 
     def test_short_timeout(self):
         args = (
@@ -514,6 +526,8 @@ def test_request_scheduled_signal(caplog):
 
 
 if __name__ == "__main__":
+    from twisted.internet import reactor  # pylint: disable=ungrouped-imports
+
     if len(sys.argv) > 1 and sys.argv[1] == "runserver":
         start_test_site(debug=True)
         reactor.run()

@@ -4,17 +4,17 @@ import shutil
 import warnings
 from pathlib import Path
 from tempfile import mkdtemp
-from typing import Any
+from typing import Any, cast
 
 import OpenSSL.SSL
 import pytest
-from twisted.internet import reactor
 from twisted.internet.defer import Deferred, inlineCallbacks
 from twisted.protocols.policies import WrappingFactory
 from twisted.trial import unittest
 from twisted.web import server, static
 from twisted.web.client import Agent, BrowserLikePolicyForHTTPS, readBody
 from twisted.web.client import Response as TxResponse
+from twisted.web.iweb import IBodyProducer
 
 from scrapy.core.downloader import Slot
 from scrapy.core.downloader.contextfactory import (
@@ -40,6 +40,8 @@ class TestContextFactoryBase(unittest.TestCase):
     context_factory = None
 
     def _listen(self, site):
+        from twisted.internet import reactor
+
         return reactor.listenSSL(
             0,
             site,
@@ -71,10 +73,19 @@ class TestContextFactoryBase(unittest.TestCase):
         client_context_factory: BrowserLikePolicyForHTTPS,
         body: str | None = None,
     ) -> bytes:
+        from twisted.internet import reactor
+
         agent = Agent(reactor, contextFactory=client_context_factory)
         body_producer = _RequestBodyProducer(body.encode()) if body else None
-        response: TxResponse = await maybe_deferred_to_future(
-            agent.request(b"GET", url.encode(), bodyProducer=body_producer)
+        response: TxResponse = cast(
+            TxResponse,
+            await maybe_deferred_to_future(
+                agent.request(
+                    b"GET",
+                    url.encode(),
+                    bodyProducer=cast(IBodyProducer, body_producer),
+                )
+            ),
         )
         with warnings.catch_warnings():
             # https://github.com/twisted/twisted/issues/8227

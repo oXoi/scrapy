@@ -479,7 +479,7 @@ class FeedExporter:
             uri = self.settings["FEED_URI"]
             # handle pathlib.Path objects
             uri = str(uri) if not isinstance(uri, Path) else uri.absolute().as_uri()
-            feed_options = {"format": self.settings.get("FEED_FORMAT", "jsonlines")}
+            feed_options = {"format": self.settings["FEED_FORMAT"]}
             self.feeds[uri] = feed_complete_default_values_from_settings(
                 feed_options, self.settings
             )
@@ -531,9 +531,7 @@ class FeedExporter:
             await maybe_deferred_to_future(DeferredList(self._pending_deferreds))
 
         # Send FEED_EXPORTER_CLOSED signal
-        await maybe_deferred_to_future(
-            self.crawler.signals.send_catch_log_deferred(signals.feed_exporter_closed)
-        )
+        await self.crawler.signals.send_catch_log_async(signals.feed_exporter_closed)
 
     def _close_slot(self, slot: FeedSlot, spider: Spider) -> Deferred[None] | None:
         def get_file(slot_: FeedSlot) -> IO[bytes]:

@@ -27,7 +27,7 @@ async def sleep(seconds: float = 0.001) -> None:
     await maybe_deferred_to_future(deferred)
 
 
-class MainTestCase(TestCase):
+class TestMain(TestCase):
     @deferred_f_from_coro_f
     async def test_sleep(self):
         """Neither asynchronous sleeps on Spider.start() nor the equivalent on
@@ -119,7 +119,7 @@ class MainTestCase(TestCase):
         assert actual_urls == expected_urls, f"{actual_urls=} != {expected_urls=}"
 
 
-class RequestSendOrderTestCase(TestCase):
+class TestRequestSendOrder(TestCase):
     seconds = 0.1  # increase if flaky
 
     @classmethod
@@ -189,9 +189,9 @@ class RequestSendOrderTestCase(TestCase):
 
     @deferred_f_from_coro_f
     async def test_default(self):
-        """By default, start requests take priority over callback requests and
+        """By default, callback requests take priority over start requests and
         are sent in order. Priority matters, but given the same priority, a
-        start request takes precedence."""
+        callback request takes precedence."""
         nums = [1, 2, 3, 4, 5, 6]
         response_seconds = 0
         download_slots = 1
@@ -207,13 +207,13 @@ class RequestSendOrderTestCase(TestCase):
             yield _request(1)
 
             for request in (
-                _request(4, priority=1),
-                _request(6),
+                _request(2, priority=1),
+                _request(5),
             ):
                 spider.crawler.engine._slot.scheduler.enqueue_request(request)
-            yield _request(5)
-            yield _request(2, priority=1)
+            yield _request(6)
             yield _request(3, priority=1)
+            yield _request(4, priority=1)
 
         def parse(spider, response):
             return
@@ -249,13 +249,13 @@ class RequestSendOrderTestCase(TestCase):
             yield _request(1)
 
             for request in (
-                _request(4, priority=1),
-                _request(6),
+                _request(2, priority=1),
+                _request(5),
             ):
                 spider.crawler.engine._slot.scheduler.enqueue_request(request)
-            yield _request(5)
+            yield _request(6)
+            yield _request(4, priority=1)
             yield _request(3, priority=1)
-            yield _request(2, priority=1)
 
         def parse(spider, response):
             return
