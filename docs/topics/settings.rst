@@ -330,7 +330,8 @@ exception is raised.
 
 These settings are:
 
--   :setting:`ASYNCIO_EVENT_LOOP`
+-   :setting:`ASYNCIO_EVENT_LOOP` (not possible to set per-spider when using
+    :class:`~scrapy.crawler.AsyncCrawlerProcess`, see below)
 
 -   :setting:`DNS_RESOLVER` and settings used by the corresponding
     component, e.g. :setting:`DNSCACHE_ENABLED`, :setting:`DNSCACHE_SIZE`
@@ -338,11 +339,24 @@ These settings are:
 
 -   :setting:`REACTOR_THREADPOOL_MAXSIZE`
 
--   :setting:`TWISTED_REACTOR`
+-   :setting:`TWISTED_REACTOR` (ignored when using
+    :class:`~scrapy.crawler.AsyncCrawlerProcess`, see below)
 
 :setting:`ASYNCIO_EVENT_LOOP` and :setting:`TWISTED_REACTOR` are used upon
 installing the reactor. The rest of the settings are applied when starting
 the reactor.
+
+There is an additional restriction for :setting:`TWISTED_REACTOR` and
+:setting:`ASYNCIO_EVENT_LOOP` when using
+:class:`~scrapy.crawler.AsyncCrawlerProcess`: when this class is instantiated,
+it installs :class:`~twisted.internet.asyncioreactor.AsyncioSelectorReactor`,
+ignoring the value of :setting:`TWISTED_REACTOR` and using the value of
+:setting:`ASYNCIO_EVENT_LOOP` that was passed to
+:meth:`AsyncCrawlerProcess.__init__()
+<scrapy.crawler.AsyncCrawlerProcess.__init__>`. If a different value for
+:setting:`TWISTED_REACTOR` or :setting:`ASYNCIO_EVENT_LOOP` is provided later,
+e.g. in :ref:`per-spider settings <spider-settings>`, an exception will be
+raised.
 
 
 .. _topics-settings-ref:
@@ -503,7 +517,7 @@ performed by the Scrapy downloader.
 CONCURRENT_REQUESTS_PER_DOMAIN
 ------------------------------
 
-Default: ``8``
+Default: ``1`` (:ref:`fallback <default-settings>`: ``8``)
 
 The maximum number of concurrent (i.e. simultaneous) requests that will be
 performed to any single domain.
@@ -710,7 +724,8 @@ connections (for ``HTTP10DownloadHandler``).
 
 .. note::
 
-    HTTP/1.0 is rarely used nowadays so you can safely ignore this setting,
+    HTTP/1.0 is rarely used nowadays and its Scrapy support is deprecated,
+    so you can safely ignore this setting,
     unless you really want to use HTTP/1.0 and override
     :setting:`DOWNLOAD_HANDLERS` for ``http(s)`` scheme accordingly,
     i.e. to ``'scrapy.core.downloader.handlers.http.HTTP10DownloadHandler'``.
@@ -854,7 +869,7 @@ Whether to enable downloader stats collection.
 DOWNLOAD_DELAY
 --------------
 
-Default: ``0``
+Default: ``1`` (:ref:`fallback <default-settings>`: ``0``)
 
 Minimum seconds to wait between 2 consecutive requests to the same domain.
 
@@ -1247,6 +1262,26 @@ FEED_STORAGE_GCS_ACL
 
 The Access Control List (ACL) used when storing items to :ref:`Google Cloud Storage <topics-feed-storage-gcs>`.
 For more information on how to set this value, please refer to the column *JSON API* in `Google Cloud documentation <https://cloud.google.com/storage/docs/access-control/lists>`_.
+
+.. setting:: FORCE_CRAWLER_PROCESS
+
+FORCE_CRAWLER_PROCESS
+---------------------
+
+Default: ``False``
+
+If ``False``, :ref:`Scrapy commands that need a CrawlerProcess
+<topics-commands-crawlerprocess>` will decide between using
+:class:`scrapy.crawler.AsyncCrawlerProcess` and
+:class:`scrapy.crawler.CrawlerProcess` based on the value of the
+:setting:`TWISTED_REACTOR` setting, but ignoring its value in :ref:`per-spider
+settings <spider-settings>`.
+
+If ``True``, these commands will always use
+:class:`~scrapy.crawler.CrawlerProcess`.
+
+Set this to ``True`` if you want to set :setting:`TWISTED_REACTOR` to a
+non-default value in :ref:`per-spider settings <spider-settings>`.
 
 .. setting:: FTP_PASSIVE_MODE
 
@@ -1853,15 +1888,6 @@ it will fail loudly if there is any ``ImportError`` or ``SyntaxError`` exception
 But you can choose to silence this exception and turn it into a simple
 warning by setting ``SPIDER_LOADER_WARN_ONLY = True``.
 
-.. note::
-    Some :ref:`scrapy commands <topics-commands>` run with this setting to ``True``
-    already (i.e. they will only issue a warning and will not fail)
-    since they do not actually need to load spider classes to work:
-    :command:`scrapy runspider <runspider>`,
-    :command:`scrapy settings <settings>`,
-    :command:`scrapy startproject <startproject>`,
-    :command:`scrapy version <version>`.
-
 .. setting:: SPIDER_MIDDLEWARES
 
 SPIDER_MIDDLEWARES
@@ -1976,9 +2002,11 @@ Import path of a given :mod:`~twisted.internet.reactor`.
 
 Scrapy will install this reactor if no other reactor is installed yet, such as
 when the ``scrapy`` CLI program is invoked or when using the
+:class:`~scrapy.crawler.AsyncCrawlerProcess` class or the
 :class:`~scrapy.crawler.CrawlerProcess` class.
 
-If you are using the :class:`~scrapy.crawler.CrawlerRunner` class, you also
+If you are using the :class:`~scrapy.crawler.AsyncCrawlerRunner` class or the
+:class:`~scrapy.crawler.CrawlerRunner` class, you also
 need to install the correct reactor manually. You can do that using
 :func:`~scrapy.utils.reactor.install_reactor`:
 
@@ -1987,12 +2015,12 @@ need to install the correct reactor manually. You can do that using
 If a reactor is already installed,
 :func:`~scrapy.utils.reactor.install_reactor` has no effect.
 
-:meth:`CrawlerRunner.__init__ <scrapy.crawler.CrawlerRunner.__init__>` raises
-:exc:`Exception` if the installed reactor does not match the
+:class:`~scrapy.crawler.AsyncCrawlerRunner` and other similar classes raise an
+exception if the installed reactor does not match the
 :setting:`TWISTED_REACTOR` setting; therefore, having top-level
 :mod:`~twisted.internet.reactor` imports in project files and imported
-third-party libraries will make Scrapy raise :exc:`Exception` when
-it checks which reactor is installed.
+third-party libraries will make Scrapy raise an exception when it checks which
+reactor is installed.
 
 In order to use the reactor installed by Scrapy:
 
@@ -2024,7 +2052,7 @@ In order to use the reactor installed by Scrapy:
             self.crawler.engine.close_spider(self, "timeout")
 
 
-which raises :exc:`Exception`, becomes:
+which raises an exception, becomes:
 
 .. code-block:: python
 
@@ -2064,7 +2092,7 @@ current platform.
    ``twisted.internet.asyncioreactor.AsyncioSelectorReactor`` in the generated
    ``settings.py`` file.
 
-.. versionchanged:: VERSION
+.. versionchanged:: 2.13
    The default value was changed from ``None`` to
    ``"twisted.internet.asyncioreactor.AsyncioSelectorReactor"``.
 

@@ -4,7 +4,6 @@ import warnings
 
 import pytest
 from testfixtures import LogCapture
-from twisted.internet import reactor
 from twisted.internet.defer import Deferred, inlineCallbacks
 from twisted.python.failure import Failure
 from twisted.trial import unittest
@@ -329,6 +328,8 @@ class TestMediaPipeline(TestBaseMediaPipeline):
         rsp1 = Response("http://url")
 
         def rsp1_func():
+            from twisted.internet import reactor
+
             dfd = Deferred().addCallback(_check_downloading)
             reactor.callLater(0.1, dfd.callback, rsp1)
             return dfd
@@ -344,7 +345,7 @@ class TestMediaPipeline(TestBaseMediaPipeline):
 
     @inlineCallbacks
     def test_use_media_to_download_result(self):
-        req = Request("http://url", meta={"result": "ITSME", "response": self.fail})
+        req = Request("http://url", meta={"result": "ITSME"})
         item = {"requests": req}
         new_item = yield self.pipe.process_item(item, self.spider)
         assert new_item["results"] == [(True, "ITSME")]
