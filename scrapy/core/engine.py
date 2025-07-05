@@ -7,21 +7,24 @@ For more information see docs/topics/architecture.rst
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from time import time
 from traceback import format_exc
-from typing import TYPE_CHECKING, Any, TypeVar, cast
+from typing import TYPE_CHECKING, Any, cast
 
-from twisted.internet.defer import Deferred, inlineCallbacks, succeed
-from twisted.internet.task import LoopingCall
+from twisted.internet.defer import CancelledError, Deferred, inlineCallbacks, succeed
 from twisted.python.failure import Failure
 
 from scrapy import signals
+from scrapy.core.scheduler import BaseScheduler
 from scrapy.core.scraper import Scraper
 from scrapy.exceptions import CloseSpider, DontCloseSpider, IgnoreRequest
 from scrapy.http import Request, Response
+from scrapy.utils.asyncio import AsyncioLoopingCall, create_looping_call
 from scrapy.utils.defer import (
     deferred_f_from_coro_f,
+    deferred_from_coro,
     maybe_deferred_to_future,
 )
 from scrapy.utils.log import failure_to_exc_info, logformatter_adapter
@@ -31,8 +34,9 @@ from scrapy.utils.reactor import CallLaterOnce
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Generator
 
+    from twisted.internet.task import LoopingCall
+
     from scrapy.core.downloader import Downloader
-    from scrapy.core.scheduler import BaseScheduler
     from scrapy.crawler import Crawler
     from scrapy.logformatter import LogFormatter
     from scrapy.settings import BaseSettings, Settings
@@ -41,8 +45,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-_T = TypeVar("_T")
 
 
 class _Slot:
@@ -57,7 +59,9 @@ class _Slot:
         self.close_if_idle: bool = close_if_idle
         self.nextcall: CallLaterOnce[None] = nextcall
         self.scheduler: BaseScheduler = scheduler
-        self.heartbeat: LoopingCall = LoopingCall(nextcall.schedule)
+        self.heartbeat: AsyncioLoopingCall | LoopingCall = create_looping_call(
+            nextcall.schedule
+        )
 
     def add_request(self, request: Request) -> None:
         self.inprogress.add(request)
@@ -102,6 +106,8 @@ class ExecutionEngine:
         )
         self.start_time: float | None = None
         self._start: AsyncIterator[Any] | None = None
+        self._closewait: Deferred[None] | None = None
+        self._start_request_processing_dfd: Deferred[None] | None = None
         downloader_cls: type[Downloader] = load_object(self.settings["DOWNLOADER"])
         try:
             self.scheduler_cls: type[BaseScheduler] = self._get_scheduler_class(
@@ -114,8 +120,6 @@ class ExecutionEngine:
             raise
 
     def _get_scheduler_class(self, settings: BaseSettings) -> type[BaseScheduler]:
-        from scrapy.core.scheduler import BaseScheduler
-
         scheduler_cls: type[BaseScheduler] = load_object(settings["SCHEDULER"])
         if not issubclass(scheduler_cls, BaseScheduler):
             raise TypeError(
@@ -124,18 +128,21 @@ class ExecutionEngine:
             )
         return scheduler_cls
 
-    @deferred_f_from_coro_f
-    async def start(self, _start_request_processing=True) -> None:
+    def start(self, _start_request_processing=True) -> Deferred[None]:
+        return deferred_from_coro(self.start_async(_start_request_processing))
+
+    async def start_async(self, _start_request_processing=True) -> None:
         if self.running:
             raise RuntimeError("Engine already running")
         self.start_time = time()
-        await maybe_deferred_to_future(
-            self.signals.send_catch_log_deferred(signal=signals.engine_started)
-        )
+        await self.signals.send_catch_log_async(signal=signals.engine_started)
+        if _start_request_processing and self.spider is None:
+            # require an opened spider when not run in scrapy shell
+            return
         self.running = True
-        self._closewait: Deferred[None] = Deferred()
+        self._closewait = Deferred()
         if _start_request_processing:
-            self._start_request_processing()
+            self._start_request_processing_dfd = self._start_request_processing()
         await maybe_deferred_to_future(self._closewait)
 
     def stop(self) -> Deferred[None]:
@@ -143,15 +150,17 @@ class ExecutionEngine:
 
         @deferred_f_from_coro_f
         async def _finish_stopping_engine(_: Any) -> None:
-            await maybe_deferred_to_future(
-                self.signals.send_catch_log_deferred(signal=signals.engine_stopped)
-            )
-            self._closewait.callback(None)
+            await self.signals.send_catch_log_async(signal=signals.engine_stopped)
+            if self._closewait:
+                self._closewait.callback(None)
 
         if not self.running:
             raise RuntimeError("Engine not running")
 
         self.running = False
+        if self._start_request_processing_dfd is not None:
+            self._start_request_processing_dfd.cancel()
+            self._start_request_processing_dfd = None
         dfd = (
             self.close_spider(self.spider, reason="shutdown")
             if self.spider is not None
@@ -170,7 +179,8 @@ class ExecutionEngine:
             return self.close_spider(
                 self.spider, reason="shutdown"
             )  # will also close downloader
-        self.downloader.close()
+        if hasattr(self, "downloader"):
+            self.downloader.close()
         return succeed(None)
 
     def pause(self) -> None:
@@ -212,17 +222,30 @@ class ExecutionEngine:
         # Starts the processing of scheduled requests, as well as a periodic
         # call to that processing method for scenarios where the scheduler
         # reports having pending requests but returns none.
-        assert self._slot is not None  # typing
-        self._slot.nextcall.schedule()
-        self._slot.heartbeat.start(self._SLOT_HEARTBEAT_INTERVAL)
+        try:
+            assert self._slot is not None  # typing
+            self._slot.nextcall.schedule()
+            self._slot.heartbeat.start(self._SLOT_HEARTBEAT_INTERVAL)
 
-        while self._start and self.spider:
-            await self._process_start_next()
-            if not self.needs_backout():
-                # Give room for the outcome of self._process_start_next() to be
-                # processed before continuing with the next iteration.
-                self._slot.nextcall.schedule()
-                await self._slot.nextcall.wait()
+            while self._start and self.spider:
+                await self._process_start_next()
+                if not self.needs_backout():
+                    # Give room for the outcome of self._process_start_next() to be
+                    # processed before continuing with the next iteration.
+                    self._slot.nextcall.schedule()
+                    await self._slot.nextcall.wait()
+        except (asyncio.exceptions.CancelledError, CancelledError):
+            # self.stop() has cancelled us, nothing to do
+            return
+        except Exception:
+            # an error happened, log it and stop the engine
+            self._start_request_processing_dfd = None
+            logger.error(
+                "Error while processing requests from start()",
+                exc_info=True,
+                extra={"spider": self.spider},
+            )
+            await maybe_deferred_to_future(self.stop())
 
     def _start_scheduled_requests(self) -> None:
         if self._slot is None or self._slot.closing is not None or self.paused:
@@ -241,10 +264,10 @@ class ExecutionEngine:
 
         See :ref:`start-requests-lazy` for an example.
         """
-        assert self._slot is not None  # typing
         assert self.scraper.slot is not None  # typing
         return (
             not self.running
+            or not self._slot
             or bool(self._slot.closing)
             or self.downloader.needs_backout()
             or self.scraper.slot.needs_backout()
@@ -349,28 +372,32 @@ class ExecutionEngine:
                 signals.request_dropped, request=request, spider=self.spider
             )
 
-    def download(self, request: Request) -> Deferred[Response]:
+    @inlineCallbacks
+    def download(self, request: Request) -> Generator[Deferred[Any], Any, Response]:
         """Return a Deferred which fires with a Response as result, only downloader middlewares are applied"""
         if self.spider is None:
             raise RuntimeError(f"No open spider to crawl: {request}")
-        d: Deferred[Response | Request] = self._download(request)
-        # Deferred.addBoth() overloads don't seem to support a Union[_T, Deferred[_T]] return type
-        d2: Deferred[Response] = d.addBoth(self._downloaded, request)  # type: ignore[call-overload]
-        return d2
+        try:
+            response_or_request = yield self._download(request)
+        finally:
+            assert self._slot is not None
+            self._slot.remove_request(request)
+        if isinstance(response_or_request, Request):
+            return (yield self.download(response_or_request))
+        return response_or_request
 
-    def _downloaded(
-        self, result: Response | Request | Failure, request: Request
-    ) -> Deferred[Response] | Response | Failure:
+    @inlineCallbacks
+    def _download(
+        self, request: Request
+    ) -> Generator[Deferred[Any], Any, Response | Request]:
         assert self._slot is not None  # typing
-        self._slot.remove_request(request)
-        return self.download(result) if isinstance(result, Request) else result
-
-    def _download(self, request: Request) -> Deferred[Response | Request]:
-        assert self._slot is not None  # typing
+        assert self.spider is not None
 
         self._slot.add_request(request)
-
-        def _on_success(result: Response | Request) -> Response | Request:
+        try:
+            result: Response | Request = yield self.downloader.fetch(
+                request, self.spider
+            )
             if not isinstance(result, (Response, Request)):
                 raise TypeError(
                     f"Incorrect type: expected Response or Request, got {type(result)}: {result!r}"
@@ -391,22 +418,18 @@ class ExecutionEngine:
                     spider=self.spider,
                 )
             return result
-
-        def _on_complete(_: _T) -> _T:
-            assert self._slot is not None
+        finally:
             self._slot.nextcall.schedule()
-            return _
 
-        assert self.spider is not None
-        dwld: Deferred[Response | Request] = self.downloader.fetch(request, self.spider)
-        dwld.addCallback(_on_success)
-        dwld.addBoth(_on_complete)
-        return dwld
+    def open_spider(self, spider: Spider, close_if_idle: bool = True) -> Deferred[None]:
+        return deferred_from_coro(
+            self.open_spider_async(spider, close_if_idle=close_if_idle)
+        )
 
-    @deferred_f_from_coro_f
-    async def open_spider(
+    async def open_spider_async(
         self,
         spider: Spider,
+        *,
         close_if_idle: bool = True,
     ) -> None:
         if self._slot is not None:
@@ -422,9 +445,7 @@ class ExecutionEngine:
         await maybe_deferred_to_future(self.scraper.open_spider(spider))
         assert self.crawler.stats
         self.crawler.stats.open_spider(spider)
-        await maybe_deferred_to_future(
-            self.signals.send_catch_log_deferred(signals.spider_opened, spider=spider)
-        )
+        await self.signals.send_catch_log_async(signals.spider_opened, spider=spider)
 
     def _spider_idle(self) -> None:
         """
@@ -480,7 +501,7 @@ class ExecutionEngine:
         dfd.addErrback(log_failure("Scraper close failure"))
 
         if hasattr(self._slot.scheduler, "close"):
-            dfd.addBoth(lambda _: cast(_Slot, self._slot).scheduler.close(reason))
+            dfd.addBoth(lambda _: cast("_Slot", self._slot).scheduler.close(reason))
             dfd.addErrback(log_failure("Scheduler close failure"))
 
         dfd.addBoth(
@@ -507,12 +528,19 @@ class ExecutionEngine:
             )
         )
 
-        dfd.addBoth(lambda _: setattr(self, "slot", None))
+        def unassign_slot(_: Any) -> None:
+            self._slot = None
+
+        dfd.addBoth(unassign_slot)
         dfd.addErrback(log_failure("Error while unassigning slot"))
 
-        dfd.addBoth(lambda _: setattr(self, "spider", None))
+        def unassign_spider(_: Any) -> None:
+            self.spider = None
+
+        dfd.addBoth(unassign_spider)
         dfd.addErrback(log_failure("Error while unassigning spider"))
 
         dfd.addBoth(lambda _: self._spider_closed_callback(spider))
+        dfd.addErrback(log_failure("Error running spider_closed_callback"))
 
         return dfd

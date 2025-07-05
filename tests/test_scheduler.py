@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import warnings
 from abc import ABC, abstractmethod
 from collections import deque
 from typing import Any, NamedTuple
 
 import pytest
-from twisted.internet import defer
+from twisted.internet.defer import inlineCallbacks
 from twisted.trial.unittest import TestCase
 
 from scrapy.core.downloader import Downloader
@@ -362,11 +363,11 @@ class TestIntegrationWithDownloaderAwareInMemory(TestCase):
             },
         )
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def tearDown(self):
         yield self.crawler.stop()
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_integration_downloader_aware_priority_queue(self):
         with MockServer() as mockserver:
             url = mockserver.url("/status?n=200", is_secure=False)
@@ -389,7 +390,9 @@ class TestIncompatibility:
         scheduler.open(spider)
 
     def test_incompatibility(self):
-        with pytest.raises(
-            ValueError, match="does not support CONCURRENT_REQUESTS_PER_IP"
-        ):
-            self._incompatible()
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore")
+            with pytest.raises(
+                ValueError, match="does not support CONCURRENT_REQUESTS_PER_IP"
+            ):
+                self._incompatible()

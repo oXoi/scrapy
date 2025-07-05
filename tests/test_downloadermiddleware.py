@@ -5,7 +5,7 @@ from gzip import BadGzipFile
 from unittest import mock
 
 import pytest
-from twisted.internet.defer import Deferred, succeed
+from twisted.internet.defer import Deferred, inlineCallbacks, succeed
 from twisted.trial.unittest import TestCase
 
 from scrapy.core.downloader.middleware import DownloaderMiddlewareManager
@@ -20,15 +20,17 @@ from scrapy.utils.test import get_crawler, get_from_asyncio_queue
 class TestManagerBase(TestCase):
     settings_dict = None
 
+    @inlineCallbacks
     def setUp(self):
         self.crawler = get_crawler(Spider, self.settings_dict)
         self.spider = self.crawler._create_spider("foo")
         self.mwman = DownloaderMiddlewareManager.from_crawler(self.crawler)
         self.crawler.engine = self.crawler._create_engine()
-        return self.crawler.engine.open_spider(self.spider)
+        yield self.crawler.engine.open_spider(self.spider)
 
+    @inlineCallbacks
     def tearDown(self):
-        return self.crawler.engine.close_spider(self.spider)
+        yield self.crawler.engine.close_spider(self.spider)
 
     async def _download(
         self, request: Request, response: Response | None = None
@@ -129,6 +131,39 @@ class TestResponseFromProcessRequest(TestManagerBase):
         )
         assert result is resp
         assert not download_func.called
+
+
+class TestResponseFromProcessException(TestManagerBase):
+    """Tests middleware returning a response from process_exception."""
+
+    @deferred_f_from_coro_f
+    async def test_process_response_called(self):
+        resp = Response("http://example.com/index.html")
+        calls = []
+
+        def download_func(request, spider):
+            raise ValueError("test")
+
+        class ResponseMiddleware:
+            def process_response(self, request, response, spider):
+                calls.append("process_response")
+                return resp
+
+            def process_exception(self, request, exception, spider):
+                calls.append("process_exception")
+                return resp
+
+        self.mwman._add_middleware(ResponseMiddleware())
+
+        req = Request("http://example.com/index.html")
+        result = await maybe_deferred_to_future(
+            self.mwman.download(download_func, req, self.spider)
+        )
+        assert result is resp
+        assert calls == [
+            "process_exception",
+            "process_response",
+        ]
 
 
 class TestInvalidOutput(TestManagerBase):

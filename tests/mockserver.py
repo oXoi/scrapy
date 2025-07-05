@@ -13,26 +13,27 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
 from OpenSSL import SSL
-from twisted.internet import defer, reactor, ssl
+from twisted.internet import defer, ssl
 from twisted.internet.task import deferLater
 from twisted.names import dns, error
 from twisted.names.server import DNSServerFactory
 from twisted.web import resource, server
-from twisted.web.server import NOT_DONE_YET, GzipEncoderFactory, Site
-from twisted.web.static import File
-from twisted.web.util import redirectTo
+from twisted.web.server import NOT_DONE_YET, Site
+from twisted.web.static import Data, File
+from twisted.web.util import Redirect, redirectTo
 
 from scrapy.utils.python import to_bytes, to_unicode
+from tests import tests_datadir
 
 if TYPE_CHECKING:
     from twisted.internet.protocol import ServerFactory
 
 
-def getarg(request, name, default=None, type=None):
+def getarg(request, name, default=None, type_=None):
     if name in request.args:
         value = request.args[name][0]
-        if type is not None:
-            value = type(value)
+        if type_ is not None:
+            value = type_(value)
         return value
     return default
 
@@ -114,6 +115,8 @@ class LeafResource(resource.Resource):
     isLeaf = True
 
     def deferRequest(self, request, delay, f, *a, **kw):
+        from twisted.internet import reactor
+
         def _cancelrequest(_):
             # silence CancelledError
             d.addErrback(lambda _: None)
@@ -126,11 +129,11 @@ class LeafResource(resource.Resource):
 
 class Follow(LeafResource):
     def render(self, request):
-        total = getarg(request, b"total", 100, type=int)
-        show = getarg(request, b"show", 1, type=int)
+        total = getarg(request, b"total", 100, type_=int)
+        show = getarg(request, b"show", 1, type_=int)
         order = getarg(request, b"order", b"desc")
-        maxlatency = getarg(request, b"maxlatency", 0, type=float)
-        n = getarg(request, b"n", total, type=int)
+        maxlatency = getarg(request, b"maxlatency", 0, type_=float)
+        n = getarg(request, b"n", total, type_=int)
         if order == b"rand":
             nlist = [random.randint(1, total) for _ in range(show)]
         else:  # order == "desc"
@@ -154,8 +157,8 @@ class Follow(LeafResource):
 
 class Delay(LeafResource):
     def render_GET(self, request):
-        n = getarg(request, b"n", 1, type=float)
-        b = getarg(request, b"b", 1, type=int)
+        n = getarg(request, b"n", 1, type_=float)
+        b = getarg(request, b"b", 1, type_=int)
         if b:
             # send headers now and delay body
             request.write("")
@@ -169,7 +172,7 @@ class Delay(LeafResource):
 
 class Status(LeafResource):
     def render_GET(self, request):
-        n = getarg(request, b"n", 200, type=int)
+        n = getarg(request, b"n", 200, type_=int)
         request.setResponseCode(n)
         return b""
 
@@ -226,7 +229,7 @@ class Partial(LeafResource):
 
 class Drop(Partial):
     def _delayedRender(self, request):
-        abort = getarg(request, b"abort", 0, type=int)
+        abort = getarg(request, b"abort", 0, type_=int)
         request.write(b"this connection will be dropped\n")
         tr = request.channel.transport
         try:
@@ -243,6 +246,14 @@ class ArbitraryLengthPayloadResource(LeafResource):
         return request.content.read()
 
 
+class NoMetaRefreshRedirect(Redirect):
+    def render(self, request: server.Request) -> bytes:
+        content = Redirect.render(self, request)
+        return content.replace(
+            b'http-equiv="refresh"', b'http-no-equiv="do-not-refresh-me"'
+        )
+
+
 class Root(resource.Resource):
     def __init__(self):
         resource.Resource.__init__(self)
@@ -254,18 +265,26 @@ class Root(resource.Resource):
         self.putChild(b"raw", Raw())
         self.putChild(b"echo", Echo())
         self.putChild(b"payload", PayloadResource())
-        self.putChild(
-            b"xpayload",
-            resource.EncodingResourceWrapper(PayloadResource(), [GzipEncoderFactory()]),
-        )
         self.putChild(b"alpayload", ArbitraryLengthPayloadResource())
-        try:
-            from tests import tests_datadir
-
-            self.putChild(b"files", File(str(Path(tests_datadir, "test_site/files/"))))
-        except Exception:
-            pass
+        self.putChild(b"files", File(str(Path(tests_datadir, "test_site/files/"))))
         self.putChild(b"redirect-to", RedirectTo())
+        self.putChild(b"text", Data(b"Works", "text/plain"))
+        self.putChild(
+            b"html",
+            Data(
+                b"<body><p class='one'>Works</p><p class='two'>World</p></body>",
+                "text/html",
+            ),
+        )
+        self.putChild(
+            b"enc-gb18030",
+            Data(b"<p>gb18030 encoding</p>", "text/html; charset=gb18030"),
+        )
+        self.putChild(b"redirect", Redirect(b"/redirected"))
+        self.putChild(
+            b"redirect-no-meta-refresh", NoMetaRefreshRedirect(b"/redirected")
+        )
+        self.putChild(b"redirected", Data(b"Redirected here", "text/plain"))
 
     def getChild(self, name, request):
         return self
@@ -378,6 +397,8 @@ def ssl_context_factory(
 
 
 if __name__ == "__main__":
+    from twisted.internet import reactor
+
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "-t", "--type", type=str, choices=("http", "dns"), default="http"

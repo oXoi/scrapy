@@ -21,8 +21,9 @@ from scrapy.exceptions import (
     ScrapyDeprecationWarning,
 )
 from scrapy.http import Request, Response
+from scrapy.utils.asyncio import _parallel_asyncio, is_asyncio_available
 from scrapy.utils.defer import (
-    _defer_sleep,
+    _defer_sleep_async,
     aiter_errback,
     deferred_f_from_coro_f,
     deferred_from_coro,
@@ -111,11 +112,11 @@ class Scraper:
         assert crawler.logformatter
         self.logformatter: LogFormatter = crawler.logformatter
 
-    @inlineCallbacks
-    def open_spider(self, spider: Spider) -> Generator[Deferred[Any], Any, None]:
+    @deferred_f_from_coro_f
+    async def open_spider(self, spider: Spider) -> None:
         """Open the given spider for scraping and allocate resources for it"""
         self.slot = Slot(self.crawler.settings.getint("SCRAPER_SLOT_MAX_ACTIVE_SIZE"))
-        yield self.itemproc.open_spider(spider)
+        await maybe_deferred_to_future(self.itemproc.open_spider(spider))
 
     def close_spider(self, spider: Spider | None = None) -> Deferred[Spider]:
         """Close a spider being scraped and release its resources"""
@@ -139,7 +140,6 @@ class Scraper:
 
     def _check_if_closing(self) -> None:
         assert self.slot is not None  # typing
-        assert self.crawler.spider
         if self.slot.closing and self.slot.is_idle():
             assert self.crawler.spider
             self.slot.closing.callback(self.crawler.spider)
@@ -188,13 +188,12 @@ class Scraper:
             )
 
         assert self.crawler.spider
+        output: Iterable[Any] | AsyncIterator[Any]
         if isinstance(result, Response):
             try:
                 # call the spider middlewares and the request callback with the response
-                output = await maybe_deferred_to_future(
-                    self.spidermw.scrape_response(
-                        self.call_spider, result, request, self.crawler.spider
-                    )
+                output = await self.spidermw.scrape_response_async(
+                    self.call_spider, result, request, self.crawler.spider
                 )
             except Exception:
                 self.handle_spider_error(Failure(), request, result)
@@ -204,7 +203,7 @@ class Scraper:
 
         try:
             # call the request errback with the downloader error
-            await self.call_spider_async(result, request)
+            output = await self.call_spider_async(result, request)
         except Exception as spider_exc:
             # the errback didn't silence the exception
             if not result.check(IgnoreRequest):
@@ -219,6 +218,8 @@ class Scraper:
             if spider_exc is not result.value:
                 # the errback raised a different exception, handle it
                 self.handle_spider_error(Failure(), request, result)
+        else:
+            await self.handle_spider_output_async(output, request, result)
 
     def call_spider(
         self, result: Response | Failure, request: Request, spider: Spider | None = None
@@ -235,7 +236,7 @@ class Scraper:
         self, result: Response | Failure, request: Request
     ) -> Iterable[Any] | AsyncIterator[Any]:
         """Call the request callback or errback with the response or failure."""
-        await maybe_deferred_to_future(_defer_sleep())
+        await _defer_sleep_async()
         assert self.crawler.spider
         if isinstance(result, Response):
             if getattr(result, "request", None) is None:
@@ -309,7 +310,7 @@ class Scraper:
         self,
         result: Iterable[_T] | AsyncIterator[_T],
         request: Request,
-        response: Response,
+        response: Response | Failure,
         spider: Spider | None = None,
     ) -> Deferred[None]:
         """Pass items/requests produced by a callback to ``_process_spidermw_output()`` in parallel."""
@@ -327,14 +328,24 @@ class Scraper:
         self,
         result: Iterable[_T] | AsyncIterator[_T],
         request: Request,
-        response: Response,
+        response: Response | Failure,
     ) -> None:
         """Pass items/requests produced by a callback to ``_process_spidermw_output()`` in parallel."""
+        it: Iterable[_T] | AsyncIterator[_T]
+        if is_asyncio_available():
+            if isinstance(result, AsyncIterator):
+                it = aiter_errback(result, self.handle_spider_error, request, response)
+            else:
+                it = iter_errback(result, self.handle_spider_error, request, response)
+            await _parallel_asyncio(
+                it, self.concurrent_items, self._process_spidermw_output_async, response
+            )
+            return
         if isinstance(result, AsyncIterator):
-            ait = aiter_errback(result, self.handle_spider_error, request, response)
+            it = aiter_errback(result, self.handle_spider_error, request, response)
             await maybe_deferred_to_future(
                 parallel_async(
-                    ait,
+                    it,
                     self.concurrent_items,
                     self._process_spidermw_output,
                     response,
@@ -351,8 +362,19 @@ class Scraper:
             )
         )
 
-    @deferred_f_from_coro_f
-    async def _process_spidermw_output(self, output: Any, response: Response) -> None:
+    def _process_spidermw_output(
+        self, output: Any, response: Response | Failure
+    ) -> Deferred[None]:
+        """Process each Request/Item (given in the output parameter) returned
+        from the given spider.
+
+        Items are sent to the item pipelines, requests are scheduled.
+        """
+        return deferred_from_coro(self._process_spidermw_output_async(output, response))
+
+    async def _process_spidermw_output_async(
+        self, output: Any, response: Response | Failure
+    ) -> None:
         """Process each Request/Item (given in the output parameter) returned
         from the given spider.
 
@@ -363,12 +385,21 @@ class Scraper:
             self.crawler.engine.crawl(request=output)
             return
         if output is not None:
-            await maybe_deferred_to_future(
-                self.start_itemproc(output, response=response)
-            )
+            await self.start_itemproc_async(output, response=response)
 
-    @deferred_f_from_coro_f
-    async def start_itemproc(self, item: Any, *, response: Response | None) -> None:
+    def start_itemproc(
+        self, item: Any, *, response: Response | Failure | None
+    ) -> Deferred[None]:
+        """Send *item* to the item pipelines for processing.
+
+        *response* is the source of the item data. If the item does not come
+        from response data, e.g. it was hard-coded, set it to ``None``.
+        """
+        return deferred_from_coro(self.start_itemproc_async(item, response=response))
+
+    async def start_itemproc_async(
+        self, item: Any, *, response: Response | Failure | None
+    ) -> None:
         """Send *item* to the item pipelines for processing.
 
         *response* is the source of the item data. If the item does not come
@@ -387,14 +418,12 @@ class Scraper:
                 logger.log(
                     *logformatter_adapter(logkws), extra={"spider": self.crawler.spider}
                 )
-            await maybe_deferred_to_future(
-                self.signals.send_catch_log_deferred(
-                    signal=signals.item_dropped,
-                    item=item,
-                    response=response,
-                    spider=self.crawler.spider,
-                    exception=ex,
-                )
+            await self.signals.send_catch_log_async(
+                signal=signals.item_dropped,
+                item=item,
+                response=response,
+                spider=self.crawler.spider,
+                exception=ex,
             )
         except Exception as ex:
             logkws = self.logformatter.item_error(
@@ -405,14 +434,12 @@ class Scraper:
                 extra={"spider": self.crawler.spider},
                 exc_info=True,
             )
-            await maybe_deferred_to_future(
-                self.signals.send_catch_log_deferred(
-                    signal=signals.item_error,
-                    item=item,
-                    response=response,
-                    spider=self.crawler.spider,
-                    failure=Failure(),
-                )
+            await self.signals.send_catch_log_async(
+                signal=signals.item_error,
+                item=item,
+                response=response,
+                spider=self.crawler.spider,
+                failure=Failure(),
             )
         else:
             logkws = self.logformatter.scraped(output, response, self.crawler.spider)
@@ -420,13 +447,11 @@ class Scraper:
                 logger.log(
                     *logformatter_adapter(logkws), extra={"spider": self.crawler.spider}
                 )
-            await maybe_deferred_to_future(
-                self.signals.send_catch_log_deferred(
-                    signal=signals.item_scraped,
-                    item=output,
-                    response=response,
-                    spider=self.crawler.spider,
-                )
+            await self.signals.send_catch_log_async(
+                signal=signals.item_scraped,
+                item=output,
+                response=response,
+                spider=self.crawler.spider,
             )
         finally:
             self.slot.itemproc_size -= 1
