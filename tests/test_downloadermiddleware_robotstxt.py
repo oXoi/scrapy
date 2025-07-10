@@ -4,10 +4,9 @@ from typing import TYPE_CHECKING
 from unittest import mock
 
 import pytest
-from twisted.internet import error, reactor
+from twisted.internet import error
 from twisted.internet.defer import Deferred, maybeDeferred
 from twisted.python import failure
-from twisted.trial import unittest
 
 from scrapy.downloadermiddlewares.robotstxt import RobotsTxtMiddleware
 from scrapy.downloadermiddlewares.robotstxt import logger as mw_module_logger
@@ -22,13 +21,13 @@ if TYPE_CHECKING:
     from scrapy.crawler import Crawler
 
 
-class TestRobotsTxtMiddleware(unittest.TestCase):
-    def setUp(self):
+class TestRobotsTxtMiddleware:
+    def setup_method(self):
         self.crawler = mock.MagicMock()
         self.crawler.settings = Settings()
         self.crawler.engine.download = mock.MagicMock()
 
-    def tearDown(self):
+    def teardown_method(self):
         del self.crawler
 
     def test_robotstxt_settings(self):
@@ -53,6 +52,8 @@ Disallow: /some/randome/page.html
         response = TextResponse("http://site.local/robots.txt", body=ROBOTS)
 
         def return_response(request):
+            from twisted.internet import reactor
+
             deferred = Deferred()
             reactor.callFromThread(deferred.callback, response)
             return deferred
@@ -102,6 +103,8 @@ Disallow: /some/randome/page.html
         )
 
         def return_response(request):
+            from twisted.internet import reactor
+
             deferred = Deferred()
             reactor.callFromThread(deferred.callback, response)
             return deferred
@@ -124,6 +127,8 @@ Disallow: /some/randome/page.html
         response = Response("http://site.local/robots.txt")
 
         def return_response(request):
+            from twisted.internet import reactor
+
             deferred = Deferred()
             reactor.callFromThread(deferred.callback, response)
             return deferred
@@ -145,6 +150,8 @@ Disallow: /some/randome/page.html
         err = error.DNSLookupError("Robotstxt address not found")
 
         def return_failure(request):
+            from twisted.internet import reactor
+
             deferred = Deferred()
             reactor.callFromThread(deferred.errback, failure.Failure(err))
             return deferred
@@ -178,6 +185,8 @@ Disallow: /some/randome/page.html
         self.crawler.settings.set("ROBOTSTXT_OBEY", True)
 
         def ignore_request(request):
+            from twisted.internet import reactor
+
             deferred = Deferred()
             reactor.callFromThread(deferred.errback, failure.Failure(IgnoreRequest()))
             return deferred
@@ -225,12 +234,10 @@ Disallow: /some/randome/page.html
         self, request: Request, middleware: RobotsTxtMiddleware
     ) -> None:
         spider = None  # not actually used
-        await maybe_deferred_to_future(
-            self.assertFailure(
-                middleware.process_request(request, spider),  # type: ignore[arg-type]
-                IgnoreRequest,
+        with pytest.raises(IgnoreRequest):
+            await maybe_deferred_to_future(
+                maybeDeferred(middleware.process_request, request, spider)  # type: ignore[call-overload]
             )
-        )
 
     def assertRobotsTxtRequested(self, base_url: str) -> None:
         calls = self.crawler.engine.download.call_args_list
@@ -239,12 +246,10 @@ Disallow: /some/randome/page.html
         assert request.callback == NO_CALLBACK
 
 
+@pytest.mark.skipif(not rerp_available(), reason="Rerp parser is not installed")
 class TestRobotsTxtMiddlewareWithRerp(TestRobotsTxtMiddleware):
-    if not rerp_available():
-        skip = "Rerp parser is not installed"
-
-    def setUp(self):
-        super().setUp()
+    def setup_method(self):
+        super().setup_method()
         self.crawler.settings.set(
             "ROBOTSTXT_PARSER", "scrapy.robotstxt.RerpRobotParser"
         )

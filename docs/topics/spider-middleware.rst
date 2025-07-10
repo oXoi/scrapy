@@ -86,7 +86,7 @@ one or more of these methods:
         You may yield the same type of objects as :meth:`~scrapy.Spider.start`.
 
         To write spider middlewares that work on Scrapy versions lower than
-        VERSION, define also a synchronous ``process_start_requests()`` method
+        2.13, define also a synchronous ``process_start_requests()`` method
         that returns an iterable. For example:
 
         .. code-block:: python
@@ -354,7 +354,7 @@ Default: ``'scrapy.spidermiddlewares.referer.DefaultReferrerPolicy'``
 Acceptable values for REFERRER_POLICY
 *************************************
 
-- either a path to a ``scrapy.spidermiddlewares.referer.ReferrerPolicy``
+- either a path to a :class:`scrapy.spidermiddlewares.referer.ReferrerPolicy`
   subclass — a custom policy or one of the built-in ones (see classes below),
 - or one or more comma-separated standard W3C-defined string values,
 - or the special ``"scrapy-default"``.
@@ -372,6 +372,8 @@ String value                             Class name (as a string)
 `"strict-origin-when-cross-origin"`_     :class:`scrapy.spidermiddlewares.referer.StrictOriginWhenCrossOriginPolicy`
 `"unsafe-url"`_                          :class:`scrapy.spidermiddlewares.referer.UnsafeUrlPolicy`
 =======================================  ========================================================================
+
+.. autoclass:: ReferrerPolicy
 
 .. autoclass:: DefaultReferrerPolicy
 .. warning::

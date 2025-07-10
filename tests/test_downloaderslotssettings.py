@@ -1,7 +1,6 @@
 import time
 
-from twisted.internet import defer
-from twisted.trial.unittest import TestCase
+from twisted.internet.defer import inlineCallbacks
 
 from scrapy import Request
 from scrapy.core.downloader import Downloader, Slot
@@ -49,20 +48,20 @@ class DownloaderSlotsSettingsTestSpider(MetaSpider):
         self.times[slot].append(time.time())
 
 
-class CrawlTestCase(TestCase):
+class TestCrawl:
     @classmethod
-    def setUpClass(cls):
+    def setup_class(cls):
         cls.mockserver = MockServer()
         cls.mockserver.__enter__()
 
     @classmethod
-    def tearDownClass(cls):
+    def teardown_class(cls):
         cls.mockserver.__exit__(None, None, None)
 
-    def setUp(self):
+    def setup_method(self):
         self.runner = CrawlerRunner()
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_delay(self):
         crawler = get_crawler(DownloaderSlotsSettingsTestSpider)
         yield crawler.crawl(mockserver=self.mockserver)

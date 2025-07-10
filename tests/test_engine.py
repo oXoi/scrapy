@@ -17,15 +17,16 @@ from collections import defaultdict
 from dataclasses import dataclass
 from logging import DEBUG
 from pathlib import Path
-from threading import Timer
 from unittest.mock import Mock
 from urllib.parse import urlparse
 
 import attr
+import pytest
 from itemadapter import ItemAdapter
 from pydispatch import dispatcher
-from twisted.internet import defer, reactor
-from twisted.trial import unittest
+from testfixtures import LogCapture
+from twisted.internet import defer
+from twisted.internet.defer import inlineCallbacks
 from twisted.web import server, static, util
 
 from scrapy import signals
@@ -130,6 +131,8 @@ class ChangeCloseReasonSpider(MySpider):
 
 
 def start_test_site(debug=False):
+    from twisted.internet import reactor
+
     root_dir = Path(tests_datadir, "test_site")
     r = static.File(str(root_dir))
     r.putChild(b"redirect", util.Redirect(b"/redirected"))
@@ -242,7 +245,7 @@ class CrawlerRun:
         self.signals_caught[sig] = signalargs
 
 
-class TestEngineBase(unittest.TestCase):
+class TestEngineBase:
     @staticmethod
     def _assert_visited_urls(run: CrawlerRun) -> None:
         must_be_visited = [
@@ -387,7 +390,7 @@ class TestEngineBase(unittest.TestCase):
 
 
 class TestEngine(TestEngineBase):
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_crawler(self):
         for spider in (
             MySpider,
@@ -404,20 +407,20 @@ class TestEngine(TestEngineBase):
             self._assert_signals_caught(run)
             self._assert_bytes_received(run)
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_crawler_dupefilter(self):
         run = CrawlerRun(DupeFilterSpider)
         yield run.run()
         self._assert_scheduled_requests(run, count=8)
         self._assert_dropped_requests(run)
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_crawler_itemerror(self):
         run = CrawlerRun(ItemZeroDivisionErrorSpider)
         yield run.run()
         self._assert_items_error(run)
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_crawler_change_close_reason_on_idle(self):
         run = CrawlerRun(ChangeCloseReasonSpider)
         yield run.run()
@@ -426,24 +429,52 @@ class TestEngine(TestEngineBase):
             "reason": "custom_reason",
         } == run.signals_caught[signals.spider_closed]
 
-    @defer.inlineCallbacks
+    @inlineCallbacks
     def test_close_downloader(self):
         e = ExecutionEngine(get_crawler(MySpider), lambda _: None)
         yield e.close()
 
-    @defer.inlineCallbacks
+    def test_close_without_downloader(self):
+        class CustomException(Exception):
+            pass
+
+        class BadDownloader:
+            def __init__(self, crawler):
+                raise CustomException
+
+        with pytest.raises(CustomException):
+            ExecutionEngine(
+                get_crawler(MySpider, {"DOWNLOADER": BadDownloader}), lambda _: None
+            )
+
+    @inlineCallbacks
     def test_start_already_running_exception(self):
         e = ExecutionEngine(get_crawler(MySpider), lambda _: None)
-        yield e.open_spider(MySpider(), [])
+        yield e.open_spider(MySpider())
         e.start()
+        with pytest.raises(RuntimeError, match="Engine already running"):
+            yield e.start()
+        yield e.stop()
 
-        def cb(exc: BaseException) -> None:
-            assert str(exc), "Engine already running"
+    @inlineCallbacks
+    def test_start_request_processing_exception(self):
+        class BadRequestFingerprinter:
+            def fingerprint(self, request):
+                raise ValueError  # to make Scheduler.enqueue_request() fail
 
-        try:
-            yield self.assertFailure(e.start(), RuntimeError).addBoth(cb)
-        finally:
-            yield e.stop()
+        class SimpleSpider(Spider):
+            name = "simple"
+
+            async def start(self):
+                yield Request("data:,")
+
+        crawler = get_crawler(
+            SimpleSpider, {"REQUEST_FINGERPRINTER_CLASS": BadRequestFingerprinter}
+        )
+        with LogCapture() as log:
+            yield crawler.crawl()
+        assert "Error while processing requests from start()" in str(log)
+        assert "Spider closed (shutdown)" in str(log)
 
     def test_short_timeout(self):
         args = (
@@ -462,19 +493,16 @@ class TestEngine(TestEngineBase):
             stderr=subprocess.PIPE,
         )
 
-        def kill_proc():
+        try:
+            _, stderr = p.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
             p.kill()
             p.communicate()
-            raise AssertionError("Command took too much time to complete")
+            pytest.fail("Command took too much time to complete")
 
-        timer = Timer(15, kill_proc)
-        try:
-            timer.start()
-            _, stderr = p.communicate()
-        finally:
-            timer.cancel()
-
-        assert b"Traceback" not in stderr, stderr
+        stderr_str = stderr.decode("utf-8")
+        assert "AttributeError" not in stderr_str, stderr_str
+        assert "AssertionError" not in stderr_str, stderr_str
 
 
 def test_request_scheduled_signal(caplog):
@@ -514,6 +542,8 @@ def test_request_scheduled_signal(caplog):
 
 
 if __name__ == "__main__":
+    from twisted.internet import reactor  # pylint: disable=ungrouped-imports
+
     if len(sys.argv) > 1 and sys.argv[1] == "runserver":
         start_test_site(debug=True)
         reactor.run()
